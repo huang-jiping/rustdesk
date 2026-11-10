@@ -501,6 +501,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                 }
+                if kcp.is_some() && peer_gone {
+                    peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64);
+                }
                 self.gamepad_forwarding = GamepadForwarding::Off;
                 self.stop_gamepad_capture(&mut peer).await;
                 log::debug!("Exit io_loop of id={}", self.handler.get_id());
@@ -511,9 +514,6 @@ impl<T: InvokeUiSession> Remote<T> {
                 if kcp.is_some() {
                     // Attempted rather than skipped even here: if the loss was one-way the peer
                     // does get it, and drops its side instead of waiting out its own timeout.
-                    if peer_gone {
-                        peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64);
-                    }
                     // Send the close reason if it hasn't been sent yet, as KCP cannot detect the socket close event.
                     self.send_close_reason(&mut peer, "kcp").await;
                     // KCP does not send messages immediately, so wait to ensure the last message is sent.
@@ -3320,6 +3320,23 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests_gamepad {
     use super::*;
+
+    #[test]
+    fn gone_kcp_send_deadline_precedes_final_gamepad_snapshot() {
+        // Full io_loop backpressure needs rendezvous/login setup; pin its exit ordering here.
+        let source = include_str!("io_loop.rs");
+        let exit_log = source.find("log::debug!(\"Exit io_loop").unwrap();
+        let final_cleanup = source[..exit_log]
+            .rfind("self.stop_gamepad_capture(&mut peer).await;")
+            .unwrap();
+        let deadline = source
+            .find("peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64)")
+            .unwrap();
+        assert!(
+            deadline < final_cleanup,
+            "KCP peer-gone deadline must apply before the final gamepad snapshot send"
+        );
+    }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[tokio::test]
