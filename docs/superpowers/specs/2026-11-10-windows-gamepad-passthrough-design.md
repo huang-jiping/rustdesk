@@ -204,6 +204,8 @@ IPC、接受窗口和策略 UI，因此延后。
   `gamepad-passthrough`。前者加入 `KEYS_SETTINGS`；后者沿用直接写入 peer options
   的保存路径，不扩展自定义客户端 default/override 分类列表。
 - `allow-gamepad` 关闭时必须立即通知活动连接并完整清理，不能等待下一条输入。
+- 设置 IPC 的 Options 是整表替换，普通 UI 用删除键关闭。成功更新后按有效
+  `Config::get_option(allow-gamepad)` 判断撤销，保留默认/强制覆盖语义。
 - 新增低频 FFI，用于查询和设置会话手柄状态。
 - 通过现有 Rust 到 Dart 会话事件流发送 `gamepad_status`。
 - 扩展 Dart peer feature 模型，字段缺失默认为 false。
@@ -460,3 +462,21 @@ Session/Flutter 只加低频能力、启停和事件；桌面 toolbar/settings�
 `hbb_common`、移动端、Sciter、共享 toolbar、Web JS 和 portable-service 输入 IPC
 均无分支差异。Task 8 产品修改仅上述英文表删除，其余为验证文档，未新增状态机、
 计时器、缓存或无关修复。
+
+### Task 8 修复轮 1：设置删除键时立即撤销
+
+整体验收发现此前撤销 hook 误把 Options 当成局部补丁：普通客户端关闭开关发送
+整张表并删除 `allow-gamepad`，旧 hook 对 None 不撤销；保持不变的输入可能继续
+停留在后端，直到新输入或连接关闭才清理。此项是实际设置路径错误，不属于已接受
+的旧 session 二次 disable 回调限制。
+
+本轮删除更新前的可选值快照，成功保存后读取包含 default/override 的有效配置，
+非 Y 即撤销；失败更新仍提前返回。缺键在撤销 helper 中也按关闭处理。其他单键
+setter 先取得完整 options 再修改并发送；因此没有把局部 patch 的缺键当作关闭。
+Task 4 计划同步修正整表语义，不修改 hbb_common 或通用配置 API。
+
+现有 Connection/mock backend 清理测试改为先保留完整表中的 Y，再删除该键而不
+发送下一条输入。旧实现出现等待 neutral 的 Timeout（退出 101）；修复后连接测试
+4 passed、手柄专项 29 passed / 1 ignored、IPC 既有测试 3 passed（均退出 0）。此为
+真实 session/worker 清理回归与配置语义静态核查，不是 native UI 点击或完整 IPC
+持久化端到端验收；这些环境限制继续保留。本轮不增加状态、计时器或测试基础设施。

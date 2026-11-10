@@ -288,9 +288,10 @@ worker 串行操作 `vigem-client`。protobuf、Flutter 和配置只承载能力
 
 - [ ] **Step 5：接入设置撤销**
 
-  `ipc::Data::Options(Some(value))` 成功更新配置后，仅当变更包含
-  `allow-gamepad` 且新值不是 `Y` 时调用 `revoke_active_gamepad()`。不要为此修改通用
-  permission enum 或 `hbb_common`。
+  `ipc::Data::Options(Some(value))` 是整表替换，普通 UI 用删除键表达关闭。成功更新后
+  读取有效 `Config::get_option(allow-gamepad)`（包含默认/强制覆盖），值不是 `Y` 时
+  调用 `revoke_active_gamepad()`；不得把缺键当作局部更新的“未修改”。不要为此修改
+  通用 permission enum 或 `hbb_common`。
 
 - [ ] **Step 6：运行测试**
 

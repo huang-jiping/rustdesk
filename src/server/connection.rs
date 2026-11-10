@@ -7612,8 +7612,13 @@ mod tests {
         for revoke in 0..6 {
             let mut conn = connection().await;
             let (events, mut statuses) = active_gamepad(&mut conn).await;
-            crate::ipc::revoke_gamepad_if_disabled(None);
-            crate::ipc::revoke_gamepad_if_disabled(Some("Y"));
+            let mut options = HashMap::<String, String>::from([(
+                keys::OPTION_ALLOW_GAMEPAD.into(),
+                "Y".into(),
+            )]);
+            crate::ipc::revoke_gamepad_if_disabled(
+                options.get(keys::OPTION_ALLOW_GAMEPAD).map(String::as_str),
+            );
             conn.set_keyboard_permission(true);
             assert!(statuses.try_recv().is_err());
             match revoke {
@@ -7625,7 +7630,12 @@ mod tests {
                     })
                     .await
                 }
-                2 => crate::ipc::revoke_gamepad_if_disabled(Some("")),
+                2 => {
+                    options.remove(keys::OPTION_ALLOW_GAMEPAD);
+                    crate::ipc::revoke_gamepad_if_disabled(
+                        options.get(keys::OPTION_ALLOW_GAMEPAD).map(String::as_str),
+                    );
+                }
                 3 => conn.on_close("test", false).await,
                 4 => {
                     assert!(conn.stop_gamepad(GamepadStatusKind::STOPPED));

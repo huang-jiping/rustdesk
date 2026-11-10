@@ -91,7 +91,7 @@ use std::{
 };
 
 pub(crate) fn revoke_gamepad_if_disabled(value: Option<&str>) {
-    if value.is_some_and(|value| value != "Y") {
+    if value != Some("Y") {
         crate::server::gamepad::revoke_active_gamepad();
     }
 }
@@ -1088,7 +1088,6 @@ async fn handle(data: Data, stream: &mut Connection) {
                 if let Some(v) = value.get("privacy-mode-impl-key") {
                     crate::privacy_mode::switch(v);
                 }
-                let gamepad_option = value.get(keys::OPTION_ALLOW_GAMEPAD).cloned();
                 if let Err(error) = crate::trusted_devices::config::update_options(value).await {
                     allow_err!(
                         stream
@@ -1097,7 +1096,7 @@ async fn handle(data: Data, stream: &mut Connection) {
                     );
                     return;
                 }
-                revoke_gamepad_if_disabled(gamepad_option.as_deref());
+                revoke_gamepad_if_disabled(Some(&Config::get_option(keys::OPTION_ALLOW_GAMEPAD)));
                 allow_err!(stream.send(&Data::Options(None)).await);
             }
         },
