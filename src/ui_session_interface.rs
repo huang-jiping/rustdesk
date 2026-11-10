@@ -56,6 +56,10 @@ use crate::{client::Data, client::Interface};
 #[path = "platform/mobile_wheel.rs"]
 mod mobile_wheel;
 
+#[cfg(any(feature = "flutter", target_os = "android", target_os = "ios", test))]
+#[path = "gamepad_ui.rs"]
+pub(crate) mod gamepad_ui;
+
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Clone, Default)]
@@ -1706,6 +1710,7 @@ impl<T: InvokeUiSession> Session<T> {
 }
 
 pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
+    fn update_gamepad_status(&self, _status: Option<GamepadStatusKind>, _local_connected: bool) {}
     fn set_cursor_data(&self, cd: CursorData);
     fn set_cursor_id(&self, id: String);
     fn set_cursor_position(&self, cp: CursorPosition);

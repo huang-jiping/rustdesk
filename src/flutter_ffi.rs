@@ -262,6 +262,78 @@ pub fn session_get_toggle_option_sync(session_id: SessionID, arg: String) -> Syn
     SyncReturn(res)
 }
 
+pub fn session_get_gamepad_enabled(session_id: SessionID) -> SyncReturn<bool> {
+    let Some(session) = sessions::get_session_by_session_id(&session_id) else {
+        return SyncReturn(false);
+    };
+    let enabled = match session.ui_handler.gamepad.read() {
+        Ok(state) => state.enabled,
+        Err(error) => {
+            log::error!("Gamepad UI state lock failed: {}", error);
+            false
+        }
+    };
+    SyncReturn(enabled)
+}
+
+pub fn session_set_gamepad_enabled(session_id: SessionID, enabled: bool) {
+    let Some(session) = sessions::get_session_by_session_id(&session_id) else {
+        return;
+    };
+    let sender = match session.sender.read() {
+        Ok(sender) => sender,
+        Err(error) => {
+            log::error!("Gamepad session sender lock failed: {}", error);
+            return;
+        }
+    };
+    let Some(sender) = sender.as_ref() else {
+        return;
+    };
+    let mut state = match session.ui_handler.gamepad.write() {
+        Ok(state) => state,
+        Err(error) => {
+            log::error!("Gamepad UI state lock failed: {}", error);
+            return;
+        }
+    };
+    match sender.send(crate::client::Data::GamepadEnabled(enabled)) {
+        Ok(()) => state.enabled = enabled,
+        Err(error) => log::error!("Gamepad control route failed: {}", error),
+    }
+}
+
+#[cfg(test)]
+mod tests_gamepad {
+    use super::*;
+    use crate::{client::Data, ui_session_interface::Session};
+
+    #[test]
+    fn gamepad_ffi_routes_only_to_the_requested_session() {
+        let missing = SessionID::new_v4();
+        assert!(!session_get_gamepad_enabled(missing).0);
+        session_set_gamepad_enabled(missing, true);
+        assert!(!session_get_gamepad_enabled(missing).0);
+
+        let session_id = SessionID::new_v4();
+        let session = Arc::new(Session::<flutter::FlutterHandler>::default());
+        let (sender, mut receiver) = hbb_common::tokio::sync::mpsc::unbounded_channel();
+        *session.sender.write().unwrap() = Some(sender);
+        sessions::insert_session(session_id, ConnType::DEFAULT_CONN, session);
+        assert!(!session_get_gamepad_enabled(session_id).0);
+        session_set_gamepad_enabled(missing, true);
+        assert!(receiver.try_recv().is_err());
+        session_set_gamepad_enabled(session_id, true);
+        assert!(matches!(receiver.try_recv(), Ok(Data::GamepadEnabled(true))));
+        assert!(session_get_gamepad_enabled(session_id).0);
+        session_set_gamepad_enabled(session_id, false);
+        assert!(matches!(receiver.try_recv(), Ok(Data::GamepadEnabled(false))));
+        assert!(!session_get_gamepad_enabled(session_id).0);
+        assert!(receiver.try_recv().is_err());
+        sessions::remove_session_by_session_id(&session_id);
+    }
+}
+
 pub fn session_get_option(session_id: SessionID, arg: String) -> Option<String> {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         Some(session.get_option(arg))

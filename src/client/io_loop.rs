@@ -152,6 +152,7 @@ pub struct Remote<T: InvokeUiSession> {
     peer_info: ParsedPeerInfo,
     gamepad_forwarding: GamepadForwarding,
     gamepad_input: watch::Receiver<Option<GamepadInput>>,
+    gamepad_local_connected: bool,
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     gamepad_capture: Option<crate::platform::windows::gamepad_capture::GamepadCapture>,
     video_threads: HashMap<usize, VideoThread>,
@@ -211,6 +212,7 @@ impl<T: InvokeUiSession> Remote<T> {
             peer_info: Default::default(),
             gamepad_forwarding: Default::default(),
             gamepad_input: watch::channel(None).1,
+            gamepad_local_connected: false,
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             gamepad_capture: None,
             video_threads: Default::default(),
@@ -398,6 +400,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             } else {
                                 let input = self.gamepad_input.borrow_and_update().clone();
                                 if let Some(input) = input {
+                                    self.update_gamepad_local_connection(input.connected);
                                     if let Err(error) = Self::send_gamepad_input(&mut peer, input).await {
                                         log::trace!("Gamepad send failed: {}", error);
                                         break;
@@ -503,6 +506,11 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 if kcp.is_some() && peer_gone {
                     peer.set_send_timeout(KCP_CLOSE_REASON_GONE_DEADLINE.as_millis() as u64);
+                }
+                if !matches!(self.gamepad_forwarding, GamepadForwarding::Off) {
+                    self.handler
+                        .ui_handler
+                        .update_gamepad_status(Some(GamepadStatusKind::STOPPED), false);
                 }
                 self.gamepad_forwarding = GamepadForwarding::Off;
                 self.stop_gamepad_capture(&mut peer).await;
@@ -843,6 +851,15 @@ impl<T: InvokeUiSession> Remote<T> {
         peer.send(&message).await
     }
 
+    fn update_gamepad_local_connection(&mut self, connected: bool) {
+        if self.gamepad_local_connected != connected {
+            self.gamepad_local_connected = connected;
+            self.handler
+                .ui_handler
+                .update_gamepad_status(None, connected);
+        }
+    }
+
     async fn stop_gamepad_capture(&mut self, _peer: &mut Stream) {
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
         if let Some(mut capture) = self.gamepad_capture.take() {
@@ -856,16 +873,18 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
             }
         }
+        self.update_gamepad_local_connection(false);
     }
 
     async fn handle_gamepad_status(&mut self, status: GamepadStatus, peer: &mut Stream) {
         if status.slot != 0 {
             return;
         }
-        match self
-            .gamepad_forwarding
-            .status(status.kind.enum_value().ok())
-        {
+        let kind = status
+            .kind
+            .enum_value()
+            .unwrap_or(GamepadStatusKind::INTERNAL_ERROR);
+        match self.gamepad_forwarding.status(Some(kind)) {
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             GamepadCaptureAction::Start => {
                 let (sender, receiver) = watch::channel(None);
@@ -879,12 +898,20 @@ impl<T: InvokeUiSession> Remote<T> {
                         if let Some(message) = self.gamepad_forwarding.control(true, false) {
                             allow_err!(peer.send(&message).await);
                         }
+                        self.handler.ui_handler.update_gamepad_status(
+                            Some(GamepadStatusKind::INTERNAL_ERROR),
+                            false,
+                        );
+                        return;
                     }
                 }
             }
             GamepadCaptureAction::Stop => self.stop_gamepad_capture(peer).await,
             _ => {}
         }
+        self.handler
+            .ui_handler
+            .update_gamepad_status(Some(kind), self.gamepad_local_connected);
     }
 
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {

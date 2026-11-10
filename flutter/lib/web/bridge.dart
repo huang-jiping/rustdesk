@@ -197,6 +197,13 @@ class RustdeskImpl {
     return 'true' == js.context.callMethod('getByName', ['option:toggle', arg]);
   }
 
+  bool sessionGetGamepadEnabled({required UuidValue sessionId, dynamic hint}) {
+    return false;
+  }
+
+  Future<void> sessionSetGamepadEnabled(
+      {required UuidValue sessionId, required bool enabled, dynamic hint}) async {}
+
   Future<String?> sessionGetOption(
       {required UuidValue sessionId, required String arg, dynamic hint}) {
     return Future(

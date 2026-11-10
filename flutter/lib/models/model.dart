@@ -42,6 +42,7 @@ import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
+import 'gamepad_model.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -49,6 +50,8 @@ import 'package:flutter_hbb/generated_bridge.dart'
     if (dart.library.html) 'package:flutter_hbb/web/bridge.dart';
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
+
+export 'gamepad_model.dart';
 
 typedef HandleMsgBox = Function(Map<String, dynamic> evt, String id);
 typedef ReconnectHandle = Function(OverlayDialogManager, SessionID, bool);
@@ -128,6 +131,7 @@ class FfiModel with ChangeNotifier {
   bool _showMyCursor = false;
   WeakReference<FFI> parent;
   late final SessionID sessionId;
+  late final GamepadModel gamepad;
 
   RxBool waitForImageDialogShow = true.obs;
   Timer? waitForImageTimer;
@@ -174,8 +178,9 @@ class FfiModel with ChangeNotifier {
   }
 
   FfiModel(this.parent) {
-    clear();
     sessionId = parent.target!.sessionId;
+    gamepad = GamepadModel(sessionId.toString());
+    clear();
     cachedPeerData.permissions = _permissions;
     virtualMouseMode = VirtualMouseMode(this);
   }
@@ -249,6 +254,7 @@ class FfiModel with ChangeNotifier {
 
   clear() {
     _pi = PeerInfo();
+    gamepad.reset();
     lastUserDisplay = null;
     _cancelPendingMonitorRestore();
     _secure = null;
@@ -339,6 +345,8 @@ class FfiModel with ChangeNotifier {
         handleMultipleWindowsSession(evt, sessionId, peerId);
       } else if (name == 'peer_info') {
         handlePeerInfo(evt, peerId, false);
+      } else if (name == 'gamepad_status') {
+        if (gamepad.update(evt)) notifyListeners();
       } else if (name == 'sync_peer_info') {
         handleSyncPeerInfo(evt, sessionId, peerId);
       } else if (name == 'sync_platform_additions') {
@@ -1458,7 +1466,7 @@ class FfiModel with ChangeNotifier {
         isRefreshing = false;
       }
       Map<String, dynamic> features = json.decode(evt['features']);
-      _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.update(features);
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -4501,10 +4509,6 @@ class Resolution {
   String toString() {
     return 'Resolution($width,$height)';
   }
-}
-
-class Features {
-  bool privacyMode = false;
 }
 
 const kInvalidDisplayIndex = -1;

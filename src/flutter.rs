@@ -257,6 +257,7 @@ pub struct FlutterHandler {
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     use_texture_render: Arc<AtomicBool>,
+    pub(crate) gamepad: Arc<RwLock<crate::ui_session_interface::gamepad_ui::GamepadUiState>>,
 }
 
 impl Default for FlutterHandler {
@@ -268,6 +269,7 @@ impl Default for FlutterHandler {
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
             ),
+            gamepad: Default::default(),
         }
     }
 }
@@ -671,6 +673,39 @@ impl FlutterHandler {
 }
 
 impl InvokeUiSession for FlutterHandler {
+    fn update_gamepad_status(&self, status: Option<GamepadStatusKind>, local_connected: bool) {
+        let status = match self.gamepad.write() {
+            Ok(mut state) => {
+                state.update(status, local_connected);
+                format!("{:?}", state.status)
+            }
+            Err(error) => {
+                hbb_common::throttled_log!(std::time::Duration::from_secs(5), error,
+                    "Gamepad UI state lock failed: {}", error);
+                return;
+            }
+        };
+        let session_ids: Vec<_> = match self.session_handlers.read() {
+            Ok(handlers) => handlers.keys().copied().collect(),
+            Err(error) => {
+                hbb_common::throttled_log!(std::time::Duration::from_secs(5), error,
+                    "Gamepad session handler lock failed: {}", error);
+                return;
+            }
+        };
+        for session_id in session_ids {
+            self.push_event_to(
+                "gamepad_status",
+                &[
+                    ("session_id", session_id.to_string()),
+                    ("status", status.clone()),
+                    ("slot", "0".to_owned()),
+                    ("local_connected", local_connected.to_string()),
+                ],
+                &[&session_id],
+            );
+        }
+    }
     // On the event stream, so that it keeps its order with the cursor_id events around it.
     fn set_cursor_data(&self, cd: CursorData) {
         let colors = cd.colors.to_vec();
@@ -902,6 +937,7 @@ impl InvokeUiSession for FlutterHandler {
         let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
+            features.insert("gamepad", f.gamepad);
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
