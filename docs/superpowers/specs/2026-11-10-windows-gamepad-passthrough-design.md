@@ -64,8 +64,8 @@ Windows 虚拟手柄驱动项目。
 
 在 Windows x64 目标依赖中固定 `vigem-client = "=0.1.4"`。该 crate 直接与已安装
 的 ViGEmBus 通信，不需要 C/C++ SDK、vcpkg overlay 或额外 DLL，是验证 MVP 最快、
-改动最小的路线。代价是它已经停止维护，因此必须锁定、审计并限制在可替换的
-`GamepadBackend` 边界内。
+改动最小的路线。其依赖的 ViGEm 项目已 EOL，第三方 Rust crate 的后续维护也无
+保证，因此必须锁定、审计并限制在可替换的 `GamepadBackend` 边界内。
 
 ### 2. 官方 ViGEmClient 静态库——后备路线
 
@@ -201,7 +201,8 @@ IPC、接受窗口和策略 UI，因此延后。
 ## 配置与 UI
 
 - 在 `libs/base/src/config/keys.rs` 增加 `allow-gamepad` 和按远端保存的
-  `gamepad-passthrough`，加入相应同步列表。
+  `gamepad-passthrough`。前者加入 `KEYS_SETTINGS`；后者沿用直接写入 peer options
+  的保存路径，不扩展自定义客户端 default/override 分类列表。
 - `allow-gamepad` 关闭时必须立即通知活动连接并完整清理，不能等待下一条输入。
 - 新增低频 FFI，用于查询和设置会话手柄状态。
 - 通过现有 Rust 到 Dart 会话事件流发送 `gamepad_status`。
@@ -282,12 +283,14 @@ Sciter 和非 Windows 路径保持不变。
 
 ## 已知风险与限制
 
-- ViGEmBus 和 `vigem-client` 均已停止维护。
+- ViGEmBus 已 EOL；第三方 `vigem-client` 的维护状态不能由 ViGEm 官方 EOL 推定，
+  本次查询未见该仓库归档或其作者的 EOL 声明，后续维护仍无保证。
 - 发布前仍需审查许可证、再分发和商标，即使 MVP 不捆绑驱动。
 - Windows ARM64 暂不支持。
 - XInput 玩家编号由 Windows 分配，不保证 Player 1。
 - 完全发生在两个 8 ms 轮询之间的极短按下和释放可能丢失。
-- 强杀进程时依赖 ViGEmBus 清理死进程目标；可控路径仍必须主动归零。
+- 强杀进程后的目标清理没有保证；crate 文档警告析构未执行可能遗留设备。可控路径
+  仍必须主动归零，强杀行为须另外验收。
 - 未来生产驱动需要 Microsoft Hardware Dev Center 签名、Secure Boot/HVCI 测试及
   持续维护；测试签名不能用于生产。
 
@@ -347,3 +350,113 @@ Sciter 和非 Windows 路径保持不变。
   证明安装包来源；此次未运行安装器。ARM64 依赖图确认无 vigem-client，但完整
   `cargo check --target aarch64-pc-windows-msvc` 因缺少 ARM64 C 编译器阻塞；根库
   测试唯一失败为已有 ACL 目录清理拒绝访问。这些不属于后端普通测试或 spike 通过。
+
+## Task 8 实际验证结果（2026-11-10）
+
+结论：实现和可运行的专项检查已验证，但完整 native Flutter 构建、全量回归和双机
+验收尚未通过。以下是本次重新执行的实际结果，不替代上文的目标与验收门禁。
+
+环境：Windows x64、PowerShell 7.6.9、Cargo/Rust 1.99.1、Flutter 3.47.9、
+Dart 3.13.7。Cargo 设置 `LIBCLANG_PATH=C:\Program Files\LLVM\bin` 和
+`VCPKG_ROOT=C:\Users\huang\.codex\toolchains\vcpkg`。命令使用已确认的绝对工具路径。
+原始命令、时间、退出码与日志保存在本地忽略目录
+`.superpowers/sdd/2026-11-10-windows-gamepad-passthrough/task-8-*`；未运行 FRB codegen，
+未生成桥接替身，未变更或重装驱动。
+
+| 命令/检查 | 实际结果 | 退出码 |
+| --- | --- | --- |
+| `cargo fmt --all -- --check` | 既有格式差异，且缺少 `src/ui/inline.rs`，未完成全树格式检查 | 1 |
+| 四个新 Rust 模块的 `rustfmt --edition 2021 --check` | 通过 | 0 |
+| `cargo check --locked -p base` | 通过，包含追加 protobuf 生成/编译 | 0 |
+| `cargo test --locked --workspace --no-fail-fast` | 编译受阻：portable packer 缺少 `data.bin`、`app_metadata.toml`，未进入完整测试 | 101 |
+| `cargo test --locked --lib` | 237 passed / 1 failed / 1 ignored | 101 |
+| `cargo test --locked --release --lib --features flutter` | 缺 `src/bridge_generated.rs`（E0583）及 5 个连带 E0277，未执行测试 | 101 |
+| `cargo test --locked --lib gamepad -- --nocapture` | 29 passed / 0 failed / 1 ignored | 0 |
+| `RUSTDESK_TEST_VIGEM=1` 下的 ignored `connects_to_vigem_1_22_0` | 1 passed：完整报告与归零读回、detach、再次 attach、Drop 后设备不可见 | 0 |
+| `cargo check --locked --target aarch64-pc-windows-msvc` | 原生依赖缺少 ARM64 `cl.exe`，未完成项目检查 | 101 |
+| ARM64 `cargo tree --locked --target aarch64-pc-windows-msvc -e features -i winapi` | 不含 `vigem-client v` 或 `winapi feature "xinput"` | 0 |
+| `flutter test --no-pub --no-test-assets test/gamepad_toolbar_test.dart` | 6 passed；是产品模型/决策测试，未渲染真实菜单或调用 native FFI | 0 |
+| `flutter test --no-pub --no-test-assets --timeout 60s` | 58 passed / 1 skipped / 17 个测试文件加载失败 | 1 |
+| `flutter analyze --no-pub` | 443 issues | 1 |
+| `dart analyze`（gamepad model/test） | No issues found | 0 |
+| 本地化与严格 UTF-8 检查 | 54 张语言表有效；en 无冗余项，其他 53 表各追加 10 个唯一 key，旧条目未变，it/template 留空 | 0 |
+| `git diff --check 52eef50c8` | 通过 | 0 |
+
+根库唯一失败仍为未改动的
+`platform::windows::installer_handoff::directory::tests::protected_directory_enforces_creator_permissions`：
+`directory.rs:115:36` 清理目录时报 `Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`。
+全量 Flutter 的加载错误仍包括缺失 `generated_bridge.dart`、`DialogTheme`/`TabBarTheme`
+与 SDK 类型不匹配，以及 `google_fonts 6.2.1` 的 FontWeight 常量求值错误。没有把这些
+环境/既有问题并入本功能修复，也没有将专项通过表述为全量通过。
+
+### 目标矩阵与未执行验收
+
+| 项目 | 状态与证据边界 |
+| --- | --- |
+| Windows x64 后端 | PASS：本机真实 ViGEm spike；驱动正在运行，PnP 版本为 `1.21.442.0`、`oem15.inf`、已签名。官方 v1.22.0 release 明示 driver version unchanged，仍不能据此证明当前安装包来源 |
+| Windows x64 native Flutter 产品构建/FFI/UI | BLOCKED：真实生成桥缺失；未实际渲染、点击、恢复/保存菜单或运行 FFI 路由测试 |
+| ARM64 | 依赖投影 PASS；capability=false 仅为 cfg 静态核查；完整构建 BLOCKED（缺 ARM64 C 编译器） |
+| 非 Windows 默认 workspace 测试 | BLOCKED：WSL Ubuntu 24.04 存在，但 login PATH 与用户 `.cargo` 均无 Linux Cargo；探测退出 127，未安装工具链或运行 Linux 测试 |
+| 未安装驱动时启动/普通远控/DRIVER_MISSING | NOT RUN：当前驱动存在，未为测试卸载；仅 mock 初始化错误与映射测试通过 |
+| 新旧端任意组合普通远控 | NOT RUN：仅能力缺失/false 的模型、I/O 门控和回环检查通过，未与旧版进程建立真实会话 |
+| 两台 Windows、物理 XInput、joy.cpl/游戏 | NOT RUN：没有本任务可用的第二台验收机器和物理手柄，未启动交互 UI 假装验收 |
+
+后续人工验收应使用两台 Windows 10/11 x64，核对被控端官方安装包来源并记录驱动
+签名与日志；先确认默认关闭及普通远控，再双端启用，在 `joy.cpl` 与实际 XInput 游戏
+逐项记录按钮、双扳机、四轴与热拔插。保持输入时分别执行关闭开关、撤销键鼠或
+allow-gamepad、断网、退出、注销、服务重启和驱动故障，检查归零及 target 消失；第二
+会话须收到 BUSY。另用无驱动机器验证 DRIVER_MISSING、用新旧端双向组合验证普通
+远控。所有这些项目当前均未执行，不承诺强杀后的驱动清理。
+
+### 来源、许可证与增量 SBOM
+
+本次再次从[官方 v1.22.0 release](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0)
+下载原资产，只保存到系统临时目录，未执行。release API 发布时刻为
+`2023-11-02T16:40:49Z`；大小、SHA-256 和 Authenticode Valid 结果均与 Task 2 一致。
+[官方 LICENSE](https://github.com/nefarius/ViGEmBus/blob/v1.22.0/LICENSE) 为 BSD-3-Clause，
+要求源码/二进制再分发保留相应声明且不得借作者名背书。
+[官方 EOL 声明](https://docs.nefarius.at/projects/ViGEm/End-of-Life/)明确 ViGEmBus 及其
+官方客户端不再更新；仓库于 2023-11-02 归档。MVP 接受外部 EOL 驱动依赖的风险，
+限制为显式启用、精确 crate、可替换后端、不捆绑驱动；不将此视为长期维护保证。
+
+下表是本功能 Windows MSVC x64 的增量组件清单，**不是完整 RustDesk 发布 SBOM**。
+实际 `cargo tree -p vigem-client --edges normal --target x86_64-pc-windows-msvc` 仅为
+`vigem-client 0.1.4 -> winapi 0.3.9`；`winapi` 是原有依赖，未新增其他包或启用 unstable
+feature。发布前仍须把这些项目及许可证全文纳入完整发布 SBOM/第三方通知。
+
+| 组件 | 来源与许可证 | SHA-256 / 产物边界 |
+| --- | --- | --- |
+| `pkg:cargo/vigem-client@0.1.4` | [精确源码 Cargo.toml](https://github.com/CasualX/vigem-client/blob/acbc38bbc159e315622b5dbd9b41048fc9f3164c/Cargo.toml)、[MIT 许可](https://github.com/CasualX/vigem-client/blob/acbc38bbc159e315622b5dbd9b41048fc9f3164c/license.txt)；[registry API](https://crates.io/api/v1/crates/vigem-client/0.1.4) 记录发布于 `2022-08-01T19:42:48.076083Z`，未 yanked | `b857e6f99efe1e1eb1e4dfb035de8ae7ec8ec56bd1928edcbd7c6e4427634d52`；本次重新下载与 registry/lockfile 一致，编入 Windows x64 |
+| `pkg:cargo/winapi@0.3.9` | [上游 manifest](https://github.com/retep998/winapi-rs/blob/0.3.9/Cargo.toml) 为 MIT OR Apache-2.0；[MIT](https://github.com/retep998/winapi-rs/blob/0.3.9/LICENSE-MIT)、[Apache](https://github.com/retep998/winapi-rs/blob/0.3.9/LICENSE-APACHE) | `5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419`；本地发布包实测与 lockfile 相同，是既有依赖 |
+| ViGEmBus setup `v1.22.0` | 官方 release 及 BSD-3-Clause，见上 | `89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a`；外部前置条件，不进入 RustDesk 提交或本地 target 产物 |
+
+本次 [CasualX 上游仓库](https://github.com/CasualX/vigem-client) API 为 `archived=false`，
+最后 push 时间为 `2023-08-11T10:32:02Z`；没有查到该作者的 EOL 声明。故修正原先
+“crate 已停止维护”的无充分来源措辞，保留长期无更新与驱动 EOL 的供应链风险。
+不能把官方客户端项目的 EOL 直接当作第三方 Rust crate 的独立声明。
+
+### 最小化裁决与已知限制
+
+- 删除 Task 7 在 `en.rs` 添加的 10 条英文等于 key 的空项；检查先 RED（退出 1）、
+  删除后 GREEN（退出 0）。英文继续回退到 key，其他语言和既有翻译保持不变。
+- 不将 `gamepad-passthrough` 加入 KEYS_*：实际 peer 保存直接写 options；这些列表
+  唯一消费者是 custom-client default/override 分类，新增分类会扩大行为范围。
+- Task 4 的完整正向 `on_message` enable/input/disable mock 集成测试仍未补：生产
+  enable 固定真实平台工厂，既有 fixture 只能独立注入 helper；不为测试增加生产 hook
+  或模拟桥。现有实际拒绝入口、会话/权限清理测试和 client 回环不替代此覆盖。
+- 保留已审查限制：重复 enable 清理期间可能短暂 BUSY；全局撤销后旧 session 的单独
+  disable 可能无第二次回调；同一网络连接新窗口在下次低频变化前没有状态重放；收到
+  DISABLED_BY_REMOTE 后远端重新授权需要重连/重新取得状态。底层后端若永久阻塞，
+  owner 保留到清理完成；不增加强夺所有权的状态或超时机制。
+- 没有新 Cargo feature；纯逻辑测试由默认测试编译，Windows x64 后端和 Flutter FFI
+  由现有 Windows release feature 测试覆盖，不修改 CI 工作流。CI 未在本任务实际运行。
+
+最终逐文件回归面检查确认：依赖文件仅增 Windows x64 依赖；protobuf 仅追加字段；
+config keys 仅注册显式授权；server 的连接/IPC 只增加手柄分派与撤权/关闭 hook；
+client 的 I/O 只增加可选采集、状态和结束清理（失联 KCP 仍使用原 500ms 期限）；
+Session/Flutter 只加低频能力、启停和事件；桌面 toolbar/settings、Web no-op bridge、
+语言表是必要功能入口。既有 Features 定义移至实际产品模型并 re-export，隐私能力
+语义不变。键鼠/媒体旧实现未改写，关闭/不支持时不启动采集或发送手柄消息。
+`hbb_common`、移动端、Sciter、共享 toolbar、Web JS 和 portable-service 输入 IPC
+均无分支差异。Task 8 产品修改仅上述英文表删除，其余为验证文档，未新增状态机、
+计时器、缓存或无关修复。
