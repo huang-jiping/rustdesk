@@ -846,6 +846,16 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (widget.ffi.connType == ConnType.defaultConn) {
       toolbarItems.add(_KeyboardMenu(id: widget.id, ffi: widget.ffi));
     }
+    toolbarItems.add(Consumer<FfiModel>(builder: (context, model, child) {
+      if (!GamepadModel.showMenu(
+          nativeWindows: !isWeb && isDesktop && isWindows,
+          peerWindows: model.isPeerWindows,
+          remoteSession: widget.ffi.connType == ConnType.defaultConn,
+          capability: model.pi.features.gamepad)) {
+        return const Offstage();
+      }
+      return _GamepadMenu(ffi: widget.ffi);
+    }));
     toolbarItems.add(_ChatMenu(id: widget.id, ffi: widget.ffi));
     if (!isWeb) {
       toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
@@ -2541,6 +2551,79 @@ class _ResolutionsMenuState extends State<_ResolutionsMenu> {
     }
     return bestFitResolution.width == rect?.width.toInt() &&
         bestFitResolution.height == rect?.height.toInt();
+  }
+}
+
+class _GamepadMenu extends StatefulWidget {
+  final FFI ffi;
+  const _GamepadMenu({required this.ffi});
+
+  @override
+  State<_GamepadMenu> createState() => _GamepadMenuState();
+}
+
+class _GamepadMenuState extends State<_GamepadMenu> {
+  @override
+  void initState() {
+    super.initState();
+    _restoreEnabled();
+  }
+
+  Future<void> _restoreEnabled() async {
+    final value = await bind.sessionGetOption(
+        sessionId: widget.ffi.sessionId, arg: kOptionGamepadPassthrough);
+    if (!mounted) return;
+    final model = widget.ffi.ffiModel;
+    if (model.gamepad.shouldRestore(value,
+        enabled:
+            bind.sessionGetGamepadEnabled(sessionId: widget.ffi.sessionId),
+        keyboardEnabled: model.keyboard && !model.viewOnly)) {
+      await bind.sessionSetGamepadEnabled(
+          sessionId: widget.ffi.sessionId, enabled: true);
+      if (mounted) setState(() {});
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final model = Provider.of<FfiModel>(context);
+    final gamepad = model.gamepad;
+    return _IconSubmenuButton(
+        tooltip: 'Gamepad',
+        icon: Icon(Icons.sports_esports,
+            color: Colors.white, size: _ToolbarTheme.buttonSize),
+        ffi: widget.ffi,
+        color: _ToolbarTheme.blueColor,
+        hoverColor: _ToolbarTheme.hoverBlueColor,
+        menuChildrenGetter: (_) => [
+              CkbMenuButton(
+                  value: gamepad.isChecked(bind.sessionGetGamepadEnabled(
+                      sessionId: widget.ffi.sessionId)),
+                  onChanged: gamepad.canToggle(
+                          keyboardEnabled: model.keyboard && !model.viewOnly)
+                      ? (value) async {
+                          if (value == null) return;
+                          await bind.sessionSetGamepadEnabled(
+                              sessionId: widget.ffi.sessionId, enabled: value);
+                          await bind.sessionPeerOption(
+                              sessionId: widget.ffi.sessionId,
+                              name: kOptionGamepadPassthrough,
+                              value: value ? 'Y' : '');
+                          if (mounted) setState(() {});
+                        }
+                      : null,
+                  child: Text(translate('Enable gamepad passthrough')),
+                  ffi: widget.ffi),
+              const Divider(),
+              MenuButton(
+                  child: Text(
+                      '${translate('Local')}: ${translate(gamepad.localStatusText)}'),
+                  ffi: widget.ffi),
+              MenuButton(
+                  child: Text(
+                      '${translate('Remote')}: ${translate(gamepad.statusText)}'),
+                  ffi: widget.ffi),
+            ]);
   }
 }
 

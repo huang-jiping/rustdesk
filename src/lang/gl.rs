@@ -824,5 +824,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Trust duration (days)", "Duración da confianza (días)"),
         ("Renew trust", "Renovar a confianza"),
         ("install-directory-not-empty-tip", "O cartafol seleccionado non está baleiro. A instalación pode eliminar os datos existentes. Considera escoller outro cartafol."),
+        ("Gamepad", ""),
+        ("Enable gamepad passthrough", ""),
+        ("Remote gamepad driver is unavailable", ""),
+        ("Gamepad is disabled on the remote device", ""),
+        ("Gamepad is active", ""),
+        ("Remote gamepad version is incompatible", ""),
+        ("No free remote gamepad slot", ""),
+        ("Remote gamepad is in use", ""),
+        ("Remote gamepad access denied", ""),
+        ("Remote gamepad error", ""),
     ].iter().cloned().collect();
 }

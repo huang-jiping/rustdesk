@@ -824,5 +824,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Trust duration (days)", "Термін довіри (у днях)"),
         ("Renew trust", "Подовжити довіру"),
         ("install-directory-not-empty-tip", "Вибрана тека не порожня. Встановлення може видалити наявні дані. Радимо вибрати іншу теку."),
+        ("Gamepad", ""),
+        ("Enable gamepad passthrough", ""),
+        ("Remote gamepad driver is unavailable", ""),
+        ("Gamepad is disabled on the remote device", ""),
+        ("Gamepad is active", ""),
+        ("Remote gamepad version is incompatible", ""),
+        ("No free remote gamepad slot", ""),
+        ("Remote gamepad is in use", ""),
+        ("Remote gamepad access denied", ""),
+        ("Remote gamepad error", ""),
     ].iter().cloned().collect();
 }

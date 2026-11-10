@@ -1253,6 +1253,10 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 enabled: enabled, fakeValue: fakeValue),
             if (isWindows)
               _OptionCheckBox(
+                  context, 'Enable gamepad passthrough', kOptionAllowGamepad,
+                  enabled: enabled),
+            if (isWindows)
+              _OptionCheckBox(
                   context, 'Enable remote printer', kOptionEnableRemotePrinter,
                   enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable clipboard', kOptionEnableClipboard,

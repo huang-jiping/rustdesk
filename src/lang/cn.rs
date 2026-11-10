@@ -824,5 +824,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Trust duration (days)", "信任有效期（天）"),
         ("Renew trust", "延长信任有效期"),
         ("install-directory-not-empty-tip", "所选文件夹不为空。安装可能删除现有数据。建议选择其他文件夹。"),
+        ("Gamepad", "手柄"),
+        ("Enable gamepad passthrough", "启用手柄透传"),
+        ("Remote gamepad driver is unavailable", "远端手柄驱动不可用"),
+        ("Gamepad is disabled on the remote device", "远端设备已禁用手柄"),
+        ("Gamepad is active", "手柄已激活"),
+        ("Remote gamepad version is incompatible", "远端手柄驱动版本不兼容"),
+        ("No free remote gamepad slot", "远端没有可用的手柄槽位"),
+        ("Remote gamepad is in use", "远端手柄正被其他连接使用"),
+        ("Remote gamepad access denied", "远端手柄访问被拒绝"),
+        ("Remote gamepad error", "远端手柄发生错误"),
     ].iter().cloned().collect();
 }

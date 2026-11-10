@@ -824,5 +824,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Trust duration (days)", "اعتماد کی مدت (دن)"),
         ("Renew trust", "اعتماد کی تجدید کریں"),
         ("install-directory-not-empty-tip", "منتخب فولڈر خالی نہیں ہے۔ انسٹالیشن موجودہ ڈیٹا کو حذف کر سکتی ہے۔ کوئی دوسرا فولڈر منتخب کرنے پر غور کریں۔"),
+        ("Gamepad", ""),
+        ("Enable gamepad passthrough", ""),
+        ("Remote gamepad driver is unavailable", ""),
+        ("Gamepad is disabled on the remote device", ""),
+        ("Gamepad is active", ""),
+        ("Remote gamepad version is incompatible", ""),
+        ("No free remote gamepad slot", ""),
+        ("Remote gamepad is in use", ""),
+        ("Remote gamepad access denied", ""),
+        ("Remote gamepad error", ""),
     ].iter().cloned().collect();
 }

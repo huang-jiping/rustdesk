@@ -16,6 +16,44 @@ class GamepadModel {
 
   GamepadModel(this.sessionId);
 
+  static bool showMenu({
+    required bool nativeWindows,
+    required bool peerWindows,
+    required bool remoteSession,
+    required bool capability,
+  }) =>
+      nativeWindows && peerWindows && remoteSession && capability;
+
+  static bool optionEnabled(String? value) => value == 'Y';
+
+  bool canToggle({required bool keyboardEnabled}) =>
+      keyboardEnabled && status != 'DISABLED_BY_REMOTE';
+
+  bool shouldRestore(String? option,
+          {required bool enabled, required bool keyboardEnabled}) =>
+      optionEnabled(option) &&
+      !enabled &&
+      keyboardEnabled &&
+      status == 'STOPPED';
+
+  bool isChecked(bool enabled) =>
+      enabled && const {'STOPPED', 'READY', 'ACTIVE'}.contains(status);
+
+  String get statusText => switch (status) {
+        'STOPPED' => 'Disconnected',
+        'READY' => 'Ready',
+        'ACTIVE' => 'Gamepad is active',
+        'DISABLED_BY_REMOTE' => 'Gamepad is disabled on the remote device',
+        'DRIVER_MISSING' => 'Remote gamepad driver is unavailable',
+        'VERSION_MISMATCH' => 'Remote gamepad version is incompatible',
+        'NO_FREE_SLOT' => 'No free remote gamepad slot',
+        'BUSY' => 'Remote gamepad is in use',
+        'ACCESS_DENIED' => 'Remote gamepad access denied',
+        _ => 'Remote gamepad error',
+      };
+
+  String get localStatusText => localConnected ? 'Connected' : 'Disconnected';
+
   bool update(Map<String, dynamic> event) {
     if (event['session_id'] != sessionId) return false;
     final nextStatus = event['status'];
