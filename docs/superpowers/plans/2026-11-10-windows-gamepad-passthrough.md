@@ -97,7 +97,7 @@ worker 串行操作 `vigem-client`。protobuf、Flutter 和配置只承载能力
 
   增加测试：`accepts_xinput_boundary_values`、`rejects_nonzero_slot`、
   `rejects_trigger_above_255`、`rejects_axis_out_of_range`、
-  `masks_undefined_button_bits`。断言合法边界精确保留，非法值返回错误且不 panic。
+  `rejects_undefined_button_bits`。断言合法边界精确保留，非法值返回错误且不 panic。
 
 - [ ] **Step 2：运行测试并确认先失败**
 
@@ -113,7 +113,7 @@ worker 串行操作 `vigem-client`。protobuf、Flutter 和配置只承载能力
 - [ ] **Step 4：实现最小 `GamepadState`、校验和后端 trait**
 
   `GamepadState` 使用 `u16 buttons`、`u8` 扳机和 `i16` 轴；转换时显式检查 slot、
-  范围和按钮掩码。此任务不创建线程、所有权或 ViGEm 后端。
+  范围；包含未定义按钮位时返回错误。此任务不创建线程、所有权或 ViGEm 后端。
 
 - [ ] **Step 5：运行协议与单元测试**
 
@@ -166,8 +166,8 @@ worker 串行操作 `vigem-client`。protobuf、Flutter 和配置只承载能力
 - [ ] **Step 3：添加精确 Windows x64 依赖**
 
   在 `cfg(all(target_os = "windows", target_arch = "x86_64"))` 依赖段添加
-  `vigem-client = "=0.1.4"`；为根 crate 现有 `winapi` 增加直接使用 XInput 所需 feature，
-  不依赖传递 feature。
+  `vigem-client = "=0.1.4"`。此任务不启用 XInput feature，避免后端任务提前改变控制端
+  采集依赖。
 
 - [ ] **Step 4：实现最小 ViGEm 适配器**
 
@@ -342,6 +342,9 @@ worker 串行操作 `vigem-client`。protobuf、Flutter 和配置只承载能力
   ```
 
 - [ ] **Step 4：实现 8 ms 采集和容量受限传递**
+
+  为根 crate 现有 `winapi` 增加直接调用 XInput 所需的 `xinput` feature，不依赖
+  `vigem-client` 的传递 feature。
 
   仅轮询 XInput 用户索引 0。采集线程使用容量为一或覆盖式 latest-state 传递；不在
   capture 线程直接访问 peer。Drop/stop 必须可重复且不 panic。
