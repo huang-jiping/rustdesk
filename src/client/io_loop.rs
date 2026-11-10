@@ -929,6 +929,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         log::error!("Gamepad control send failed: {}", error);
                         self.gamepad_forwarding = GamepadForwarding::Off;
                         self.stop_gamepad_capture(peer).await;
+                        self.handler
+                            .ui_handler
+                            .update_gamepad_status(Some(GamepadStatusKind::INTERNAL_ERROR), false);
                     }
                 }
             }
@@ -3347,6 +3350,22 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests_gamepad {
     use super::*;
+
+    #[test]
+    fn gamepad_control_send_failure_notifies_internal_error() {
+        // Observing FlutterHandler requires the missing native bridge; pin this failure hook.
+        let source = include_str!("io_loop.rs");
+        let failure = source
+            .split("log::error!(\"Gamepad control send failed")
+            .nth(1)
+            .unwrap()
+            .split("Data::Close =>")
+            .next()
+            .unwrap();
+        let failure: String = failure.split_whitespace().collect();
+        assert!(failure.contains("update_gamepad_status(Some(GamepadStatusKind::INTERNAL_ERROR),false)"),
+            "failed gamepad control sends must clear enabled and notify the UI with INTERNAL_ERROR");
+    }
 
     #[test]
     fn gone_kcp_send_deadline_precedes_final_gamepad_snapshot() {
