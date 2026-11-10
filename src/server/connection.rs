@@ -2105,6 +2105,7 @@ impl Connection {
         pi.username = username;
         pi.sas_enabled = sas_enabled;
         pi.features = Some(Features {
+            gamepad: Self::gamepad_supported(auth_conn_type),
             privacy_mode: privacy_mode::is_privacy_mode_supported(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal,
@@ -2367,6 +2368,11 @@ impl Connection {
             return true;
         }
         false
+    }
+
+    fn gamepad_supported(conn_type: AuthConnType) -> bool {
+        cfg!(all(target_os = "windows", target_arch = "x86_64"))
+            && conn_type == AuthConnType::Remote
     }
 
     fn gamepad_allowed(
@@ -7357,6 +7363,22 @@ mod tests {
         tests::SESSION_TEST, GamepadBackend, GamepadSession, GamepadState,
     };
     use base::message_proto::{GamepadControl, GamepadInput, GamepadStatusKind};
+
+    #[test]
+    fn gamepad_capability_is_limited_to_windows_x64_remote_connections() {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        assert!(Connection::gamepad_supported(AuthConnType::Remote));
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        assert!(!Connection::gamepad_supported(AuthConnType::Remote));
+        for conn_type in [
+            AuthConnType::FileTransfer,
+            AuthConnType::PortForward,
+            AuthConnType::Terminal,
+            AuthConnType::ViewCamera,
+        ] {
+            assert!(!Connection::gamepad_supported(conn_type));
+        }
+    }
 
     #[tokio::test]
     async fn gamepad_requires_authorized_remote_keyboard_and_explicit_opt_in() {
