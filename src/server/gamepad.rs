@@ -301,7 +301,7 @@ fn log_gamepad_error(error: &dyn std::fmt::Display) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base::message_proto::GamepadStatusKind;
     use std::{
@@ -309,7 +309,7 @@ mod tests {
         time::Duration,
     };
 
-    static SESSION_TEST: Mutex<()> = Mutex::new(());
+    pub(crate) static SESSION_TEST: Mutex<()> = Mutex::new(());
 
     #[derive(Debug, PartialEq)]
     enum Event {

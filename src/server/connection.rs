@@ -3,7 +3,7 @@ use super::login_failure_check::try_acquire_os_credential_login_gate;
 use super::login_failure_check::{
     evaluate_os_credential_policy, record_os_credential_failure, FailureScope,
 };
-use super::{input_service::*, *};
+use super::{gamepad::GamepadSession, input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -48,7 +48,10 @@ use hbb_common::{
 use base::{
     config::keys,
     fs::{self, can_enable_overwrite_detection, JobType},
-    message_proto::{option_message::BoolOption, permission_info::Permission},
+    message_proto::{
+        gamepad_message, option_message::BoolOption, permission_info::Permission, GamepadMessage,
+        GamepadStatus, GamepadStatusKind,
+    },
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use scrap::android::{call_main_service_key_event, call_main_service_pointer_input};
@@ -357,6 +360,7 @@ impl TerminalUserToken {
 }
 pub struct Connection {
     inner: ConnInner,
+    gamepad: Option<GamepadSession>,
     display_idx: usize,
     stream: super::Stream,
     server: super::ServerPtrWeak,
@@ -565,6 +569,7 @@ impl Connection {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let tx_cloned = tx.clone();
         let mut conn = Self {
+            gamepad: None,
             inner: ConnInner {
                 id,
                 tx: Some(tx),
@@ -803,7 +808,7 @@ impl Connection {
                         ipc::Data::SwitchPermission{name, enabled} => {
                             log::info!("Change permission {} -> {}", name, enabled);
                             if &name == "keyboard" {
-                                conn.keyboard = enabled;
+                                conn.set_keyboard_permission(enabled);
                                 conn.send_permission(Permission::Keyboard, enabled).await;
                                 if let Some(s) = conn.server.upgrade() {
                                     s.write().unwrap().subscribe(
@@ -2349,6 +2354,127 @@ impl Connection {
         self.keyboard && !self.disable_keyboard
     }
 
+    fn set_keyboard_permission(&mut self, enabled: bool) {
+        self.keyboard = enabled;
+        if !enabled {
+            self.stop_gamepad(GamepadStatusKind::DISABLED_BY_REMOTE);
+        }
+    }
+
+    fn stop_gamepad(&mut self, final_status: GamepadStatusKind) -> bool {
+        if let Some(session) = self.gamepad.take() {
+            session.disable(final_status);
+            return true;
+        }
+        false
+    }
+
+    fn gamepad_allowed(
+        authorized: bool,
+        conn_type: Option<AuthConnType>,
+        allow_gamepad: &str,
+        keyboard: bool,
+    ) -> bool {
+        authorized && conn_type == Some(AuthConnType::Remote) && allow_gamepad == "Y" && keyboard
+    }
+
+    fn send_gamepad_status(inner: &ConnInner, slot: u32, kind: GamepadStatusKind) {
+        let mut gamepad = GamepadMessage::new();
+        gamepad.set_status(GamepadStatus {
+            slot,
+            kind: kind.into(),
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_gamepad(gamepad);
+        if let Some(sender) = inner.tx.as_ref() {
+            if sender.send((Instant::now(), Arc::new(message))).is_err() {
+                log::trace!("Gamepad status receiver closed");
+            }
+        }
+    }
+
+    #[cfg(any(all(target_os = "windows", target_arch = "x86_64"), test))]
+    fn enable_gamepad(
+        &mut self,
+        backend_factory: impl FnOnce() -> Result<Box<dyn super::gamepad::GamepadBackend>, GamepadStatusKind>
+            + Send
+            + 'static,
+    ) {
+        self.gamepad.take();
+        let inner = self.inner.clone();
+        let session = GamepadSession::default();
+        let kind = session.enable(
+            move |kind| Self::send_gamepad_status(&inner, 0, kind),
+            backend_factory,
+        );
+        if kind == GamepadStatusKind::READY {
+            self.gamepad = Some(session);
+        }
+        // Initialization revoked by another thread reports its terminal status after cleanup.
+        if !matches!(
+            kind,
+            GamepadStatusKind::DISABLED_BY_REMOTE | GamepadStatusKind::STOPPED
+        ) {
+            Self::send_gamepad_status(&self.inner, 0, kind);
+        }
+    }
+
+    fn handle_gamepad(&mut self, message: GamepadMessage) {
+        let allowed = Self::gamepad_allowed(
+            self.authorized,
+            self.authed_conn_type(),
+            &Config::get_option(keys::OPTION_ALLOW_GAMEPAD),
+            self.peer_keyboard_enabled(),
+        );
+        match message.union {
+            Some(gamepad_message::Union::Control(control)) => {
+                if control.slot != 0 {
+                    Self::send_gamepad_status(
+                        &self.inner,
+                        control.slot,
+                        GamepadStatusKind::INTERNAL_ERROR,
+                    );
+                    return;
+                }
+                if !allowed {
+                    self.stop_gamepad(GamepadStatusKind::DISABLED_BY_REMOTE);
+                    Self::send_gamepad_status(
+                        &self.inner,
+                        0,
+                        GamepadStatusKind::DISABLED_BY_REMOTE,
+                    );
+                    return;
+                }
+                if !control.enabled {
+                    if !self.stop_gamepad(GamepadStatusKind::STOPPED) {
+                        Self::send_gamepad_status(&self.inner, 0, GamepadStatusKind::STOPPED);
+                    }
+                    return;
+                }
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                self.enable_gamepad(|| {
+                    crate::platform::windows::gamepad_backend::create_gamepad_backend()
+                        .map_err(|error| error.kind)
+                });
+                #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+                Self::send_gamepad_status(&self.inner, 0, GamepadStatusKind::DISABLED_BY_REMOTE);
+            }
+            Some(gamepad_message::Union::Input(input)) => {
+                if !allowed {
+                    self.stop_gamepad(GamepadStatusKind::DISABLED_BY_REMOTE);
+                    return;
+                }
+                if let Some(session) = self.gamepad.as_ref() {
+                    if let Err(error) = session.handle_input(input) {
+                        log::trace!("Discarded gamepad input: {}", error);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn clipboard_enabled(&self) -> bool {
         self.clipboard && !self.disable_clipboard
     }
@@ -2898,6 +3024,10 @@ impl Connection {
                 raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
                 return false;
             }
+        }
+        if let Some(message::Union::Gamepad(gamepad)) = msg.union {
+            self.handle_gamepad(gamepad);
+            return true;
         }
         if self.authorized {
             if matches!(msg.union.as_ref(), Some(message::Union::LoginRequest(_))) {
@@ -5055,6 +5185,9 @@ impl Connection {
         if let Ok(q) = o.disable_keyboard.enum_value() {
             if q != BoolOption::NotSet {
                 self.disable_keyboard = q == BoolOption::Yes;
+                if self.disable_keyboard {
+                    self.stop_gamepad(GamepadStatusKind::DISABLED_BY_REMOTE);
+                }
                 if let Some(s) = self.server.upgrade() {
                     s.write().unwrap().subscribe(
                         super::clipboard_service::NAME,
@@ -5310,6 +5443,7 @@ impl Connection {
             return;
         }
         self.closed = true;
+        self.stop_gamepad(GamepadStatusKind::STOPPED);
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
@@ -6765,6 +6899,7 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.stop_gamepad(GamepadStatusKind::STOPPED);
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
 
@@ -7213,6 +7348,321 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
         pi += 1;
     }
     pi == p.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::gamepad::{
+        tests::SESSION_TEST, GamepadBackend, GamepadSession, GamepadState,
+    };
+    use base::message_proto::{GamepadControl, GamepadInput, GamepadStatusKind};
+
+    #[tokio::test]
+    async fn gamepad_requires_authorized_remote_keyboard_and_explicit_opt_in() {
+        let allowed = Connection::gamepad_allowed;
+        for value in ["", "N", "true", "y", " Y"] {
+            assert!(!allowed(true, Some(AuthConnType::Remote), value, true));
+        }
+        for conn_type in [
+            None,
+            Some(AuthConnType::ViewCamera),
+            Some(AuthConnType::FileTransfer),
+            Some(AuthConnType::PortForward),
+            Some(AuthConnType::Terminal),
+        ] {
+            assert!(!allowed(true, conn_type, "Y", true));
+        }
+        assert!(!allowed(false, Some(AuthConnType::Remote), "Y", true));
+        assert!(!allowed(true, Some(AuthConnType::Remote), "Y", false));
+        assert!(allowed(true, Some(AuthConnType::Remote), "Y", true));
+        let mut conn = connection().await;
+        conn.authorized = false;
+        let (sender, mut statuses) = mpsc::unbounded_channel();
+        conn.inner.tx = Some(sender);
+        for enabled in [true, false] {
+            if !enabled {
+                conn.gamepad = Some(GamepadSession::default());
+            }
+            let mut gamepad = GamepadMessage::new();
+            gamepad.set_control(GamepadControl {
+                enabled,
+                ..Default::default()
+            });
+            let mut message = Message::new();
+            message.set_gamepad(gamepad);
+            assert!(conn.on_message(message).await);
+            assert_eq!(
+                next_status(&mut statuses).await,
+                GamepadStatusKind::DISABLED_BY_REMOTE
+            );
+            assert!(conn.gamepad.is_none());
+        }
+    }
+
+    struct Backend(std_mpsc::Sender<&'static str>);
+
+    impl GamepadBackend for Backend {
+        fn attach(&mut self, _: u8) -> ResultType<()> {
+            self.0.send("attach").unwrap();
+            Ok(())
+        }
+        fn update(&mut self, _: u8, state: &GamepadState) -> ResultType<()> {
+            self.0
+                .send(if state.connected { "input" } else { "neutral" })
+                .unwrap();
+            Ok(())
+        }
+        fn detach(&mut self, _: u8) -> ResultType<()> {
+            self.0.send("detach").unwrap();
+            Ok(())
+        }
+        fn reset_all(&mut self) {
+            self.0.send("reset").unwrap();
+        }
+    }
+
+    impl Drop for Backend {
+        fn drop(&mut self) {
+            self.0.send("drop").unwrap();
+        }
+    }
+
+    async fn connection() -> Connection {
+        let listener = hbb_common::tcp::new_listener("127.0.0.1:0", false)
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let _controller = hbb_common::socket_client::connect_tcp(address.to_string(), 3000)
+            .await
+            .unwrap();
+        let (stream, address) = listener.accept().await.unwrap();
+        Connection {
+            inner: Default::default(),
+            display_idx: 0,
+            stream: Stream::Tcp(hbb_common::tcp::FramedStream::from(stream, address)),
+            server: Default::default(),
+            hash: Default::default(),
+            read_jobs: Default::default(),
+            timer: crate::rustdesk_interval(time::interval(SEC30)),
+            file_timer: crate::rustdesk_interval(time::interval(SEC30)),
+            file_transfer: None,
+            view_camera: false,
+            terminal: false,
+            port_forward_socket: None,
+            port_forward_mux: None,
+            port_forward_address: Default::default(),
+            tx_to_cm: mpsc::unbounded_channel().0,
+            authorized: true,
+            unauthorized_id: None,
+            require_2fa: None,
+            awaiting_2fa: false,
+            trusted_device: None,
+            keyboard: true,
+            clipboard: false,
+            audio: false,
+            file: false,
+            restart: false,
+            recording: false,
+            block_input: false,
+            privacy_mode: false,
+            control_permissions: None,
+            last_test_delay: None,
+            network_delay: 0,
+            lock_after_session_end: false,
+            show_remote_cursor: false,
+            ip: Default::default(),
+            disable_keyboard: false,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            show_my_cursor: false,
+            disable_clipboard: false,
+            disable_audio: false,
+            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            enable_file_transfer: false,
+            audio_sender: None,
+            tx_input: std_mpsc::channel().0,
+            video_ack_required: false,
+            server_audit_conn: Default::default(),
+            server_audit_file: Default::default(),
+            controlled_context: None,
+            lr: Default::default(),
+            login_scope: None,
+            peer_argb: 0,
+            session_last_recv_time: None,
+            chat_unanswered: false,
+            file_transferred: false,
+            #[cfg(windows)]
+            portable: Default::default(),
+            from_switch: false,
+            voice_call_request_timestamp: None,
+            voice_calling: false,
+            options_in_login: None,
+            #[cfg(not(target_os = "ios"))]
+            pressed_modifiers: Default::default(),
+            closed: false,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            start_cm_ipc_para: None,
+            auto_disconnect_timer: None,
+            authed_conn_id: None,
+            file_remove_log_control: FileRemoveLogControl::new(0),
+            last_supported_encoding: None,
+            services_subed: false,
+            delayed_read_dir: None,
+            #[cfg(target_os = "macos")]
+            retina: Default::default(),
+            follow_remote_cursor: false,
+            follow_remote_window: false,
+            multi_ui_session: false,
+            tx_from_authed: mpsc::unbounded_channel().0,
+            printer_data: Default::default(),
+            tx_post_seq: mpsc::unbounded_channel().0,
+            conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
+            conn_audit_two_factor: ConnAuditTwoFactor::None,
+            cm_read_job_ids: Default::default(),
+            terminal_service_id: Default::default(),
+            terminal_persistent: false,
+            scope_violation_messages: Default::default(),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            terminal_user_token: None,
+            terminal_generic_service: None,
+            gamepad: None,
+        }
+    }
+
+    async fn next_status(
+        statuses: &mut mpsc::UnboundedReceiver<(Instant, Arc<Message>)>,
+    ) -> GamepadStatusKind {
+        let (_, message) = time::timeout(Duration::from_secs(5), statuses.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let Some(message::Union::Gamepad(gamepad)) = message.union.as_ref() else {
+            panic!("expected gamepad message");
+        };
+        let Some(gamepad_message::Union::Status(status)) = gamepad.union.as_ref() else {
+            panic!("expected gamepad status");
+        };
+        assert_eq!(status.slot, 0);
+        status.kind.enum_value().unwrap()
+    }
+
+    async fn active_gamepad(
+        conn: &mut Connection,
+    ) -> (
+        std_mpsc::Receiver<&'static str>,
+        mpsc::UnboundedReceiver<(Instant, Arc<Message>)>,
+    ) {
+        let (events, receiver) = std_mpsc::channel();
+        let (statuses, mut status_receiver) = mpsc::unbounded_channel();
+        conn.inner.tx = Some(statuses);
+        conn.enable_gamepad(move || Ok(Box::new(Backend(events))));
+        assert_eq!(
+            next_status(&mut status_receiver).await,
+            GamepadStatusKind::READY
+        );
+        conn.gamepad
+            .as_ref()
+            .unwrap()
+            .handle_input(GamepadInput {
+                connected: true,
+                buttons: 0x1000,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "attach"
+        );
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "input"
+        );
+        assert_eq!(
+            next_status(&mut status_receiver).await,
+            GamepadStatusKind::ACTIVE
+        );
+        (receiver, status_receiver)
+    }
+
+    #[tokio::test]
+    async fn gamepad_revokes_without_waiting_for_input_and_cleans_on_close_or_drop() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        for revoke in 0..6 {
+            let mut conn = connection().await;
+            let (events, mut statuses) = active_gamepad(&mut conn).await;
+            crate::ipc::revoke_gamepad_if_disabled(None);
+            crate::ipc::revoke_gamepad_if_disabled(Some("Y"));
+            conn.set_keyboard_permission(true);
+            assert!(statuses.try_recv().is_err());
+            match revoke {
+                0 => conn.set_keyboard_permission(false),
+                1 => {
+                    conn.update_options(&OptionMessage {
+                        disable_keyboard: BoolOption::Yes.into(),
+                        ..Default::default()
+                    })
+                    .await
+                }
+                2 => crate::ipc::revoke_gamepad_if_disabled(Some("")),
+                3 => conn.on_close("test", false).await,
+                4 => {
+                    assert!(conn.stop_gamepad(GamepadStatusKind::STOPPED));
+                }
+                _ => drop(conn),
+            }
+            for expected in ["neutral", "detach", "reset", "drop"] {
+                assert_eq!(
+                    events.recv_timeout(Duration::from_secs(5)).unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                next_status(&mut statuses).await,
+                if revoke < 3 {
+                    GamepadStatusKind::DISABLED_BY_REMOTE
+                } else {
+                    GamepadStatusKind::STOPPED
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gamepad_enable_errors_and_busy_release_allow_retry() {
+        let _serial = SESSION_TEST.lock().unwrap();
+        let mut owner = connection().await;
+        let (events, mut statuses) = active_gamepad(&mut owner).await;
+        let mut conn = connection().await;
+        let (sender, mut replies) = mpsc::unbounded_channel();
+        conn.inner.tx = Some(sender);
+        conn.enable_gamepad(|| panic!("busy owner must prevent backend initialization"));
+        assert_eq!(next_status(&mut replies).await, GamepadStatusKind::BUSY);
+        assert!(conn.gamepad.is_none());
+        drop(owner);
+        for expected in ["neutral", "detach", "reset", "drop"] {
+            assert_eq!(
+                events.recv_timeout(Duration::from_secs(5)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(next_status(&mut statuses).await, GamepadStatusKind::STOPPED);
+        conn.enable_gamepad(|| Err(GamepadStatusKind::DRIVER_MISSING));
+        assert_eq!(
+            next_status(&mut replies).await,
+            GamepadStatusKind::DRIVER_MISSING
+        );
+        assert!(conn.gamepad.is_none());
+        let (events, mut statuses) = active_gamepad(&mut conn).await;
+        assert!(conn.stop_gamepad(GamepadStatusKind::STOPPED));
+        for expected in ["neutral", "detach", "reset", "drop"] {
+            assert_eq!(
+                events.recv_timeout(Duration::from_secs(5)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(next_status(&mut statuses).await, GamepadStatusKind::STOPPED);
+        assert!(statuses.try_recv().is_err());
+    }
 }
 
 #[cfg(test)]
