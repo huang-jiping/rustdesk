@@ -97,6 +97,8 @@ use windows_service::{
 use winreg::{enums::*, RegKey};
 
 mod acl;
+#[cfg(target_arch = "x86_64")]
+pub(crate) mod gamepad_backend;
 pub(crate) mod installer_files;
 mod installer_handoff;
 mod installer_shell;

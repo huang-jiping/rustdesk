@@ -217,7 +217,8 @@ IPC、接受窗口和策略 UI，因此延后。
 - 非法输入在进入工作线程前拒绝；重复错误节流。
 - attach 失败不得留下半创建目标；update 失败后尝试归零/移除。
 - 控制端采集失败时尽可能发送断开状态并停止线程。
-- MVP 不自动重试；用户修复问题后手动重新启用。
+- MVP 不自动重连或重新启用；用户修复问题后手动启用。底层完整报告仅在首次返回
+  `WinError(259)` 时等待 1 ms 并重提一次，第二次失败仍按后端故障清理。
 - 只声明支持 ViGEmBus `v1.22.0`；只有 client API 明确报告时才发送
   `VERSION_MISMATCH`。
 
@@ -296,3 +297,53 @@ Sciter 和非 Windows 路径保持不变。
 - XInput 采集与 ViGEm 后端使用一个 Windows 模块还是两个同级模块。
 - Flutter 状态展示复用哪些现有 event/model 类。
 - 测试 helper 和 mock 的具体名称，只要保持上述行为和回归约束。
+
+## Task 2 依赖审计证据（2026-11-10）
+
+- 官方驱动来源：[ViGEmBus v1.22.0 release](https://github.com/nefarius/ViGEmBus/releases/tag/v1.22.0)，
+  资产为 [ViGEmBus_1.22.0_x64_x86_arm64.exe](https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe)。
+  从官方 GitHub release API 确认资产名及大小 `6278576` 字节，下载到临时目录后用
+  `Get-FileHash -Algorithm SHA256` 实测为
+  `89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a`。
+  `Get-AuthenticodeSignature` 返回 `Valid`，签名主体为
+  `Nefarius Software Solutions e.U.`。只下载校验，没有执行安装包或安装驱动。
+- [vigem-client 0.1.4](https://docs.rs/vigem-client/0.1.4/vigem_client/) 精确固定于
+  Windows x64 target 依赖段；crate 压缩包实测 SHA-256 与 Cargo.lock checksum 均为
+  `b857e6f99efe1e1eb1e4dfb035de8ae7ec8ec56bd1928edcbd7c6e4427634d52`。
+  发布包 `.cargo_vcs_info.json` 记录源码提交
+  `acbc38bbc159e315622b5dbd9b41048fc9f3164c`，对应
+  [上游源码](https://github.com/CasualX/vigem-client/tree/acbc38bbc159e315622b5dbd9b41048fc9f3164c)。
+- 审阅发布包 `Cargo.toml`、`license.txt`、`client.rs`、`event.rs`、`bus.rs` 和 `x360.rs`
+  中使用路径。普通依赖仅 `winapi 0.3`；`rusty-xinput`、`urandom` 仅为其开发依赖，
+  不引入 RustDesk。crate 无 build script、C/C++ SDK 或额外 DLL；未启用两个 unstable
+  feature。其自身 `winapi/xinput` 仅提供报告结构，Task 2 未修改 RustDesk 的采集
+  feature。MIT 许可要求保留版权和许可声明，发布 SBOM/通知应列出该 crate 与 winapi；
+  此处是源码与许可清单核查，不代替发布法律审查。
+- 连接使用 SetupAPI 枚举接口及 `CreateFileW`，通过 `DeviceIoControl` 和
+  `GetOverlappedResult` 同步等待；目标及 client 使用 Drop 关闭事件、移除目标和关闭
+  句柄。因此后续调用必须放在专用 OS 工作线程，不能在 async 网络任务中直接调用。
+  后端只公开 `GamepadBackend` 与稳定状态错误，不泄漏 ViGEm 句柄、报告或数字错误码。
+- 已知上游限制：`plugin` 遍历序列号并将全部失败折叠成 `NoFreeSlot`；
+  `Event::new` 只用 debug assertion 检查事件创建；`wait_ready` 接受旧驱动的特定错误，
+  `connect` 仅检查协议版本，不能证明安装的是正式 v1.22.0。实机环境须另外核对驱动。
+  `Xbox360Wired` 的 Drop 忽略 unplug 错误，后端主动归零和移除并报告失败，Drop 仅作
+  最后兜底。上游文档警告强杀进程可能遗留设备，因此仍需后续实机验收，不能宣称已
+  验证驱动会清理所有强杀场景。
+- 已验证初始失败根因：首次完整报告返回 `WinError(259)`。官方 v1.22.0 的
+  [SubmitReportImpl](https://github.com/nefarius/ViGEmBus/blob/v1.22.0/sys/XusbPdo.cpp#L907-L956)
+  在没有待处理 USB 输入请求时于复制/缓存报告之前返回；
+  [官方客户端](https://github.com/nefarius/ViGEmClient/blob/master/src/ViGEmClient.cpp#L921-L967)
+  对该类错误返回成功，crate 0.1.4 则返回 `WinError`。临时实机诊断显示第一次 259
+  后立即及 20 ms 后均未收到目标状态，重提后才读回精确报告；另一组无打印/读取干扰
+  的采样在第 1 次 259 后，于第 2 次（1 ms 间隔）成功。诊断代码已删除。
+- 经主会话批准，提交函数仅在首个 259 后等待 1 ms，原样重提一次；不吞掉失败，第二次
+  或其他错误原样传播。非零更新与 detach/Drop 的零报告使用同一函数，不增加持久状态。
+  先取得 helper 缺失的 RED（退出 101），再实现并取得普通测试 `5 passed; 1 ignored`
+  （退出 0）。最终 ignored `connects_to_vigem_1_22_0` 退出 0，验证首次完整更新与
+  XInput 精确读回、归零读回、移除、重新附加和 Drop 清理后的设备不可见。
+  测试读取使用 crate 已带入的 winapi feature union，未增加根采集 feature。
+- 此次实机上 ViGEmBus 正在运行，PnP 与 `ViGEmBus.sys` 版本均为 `1.21.442.0`。
+  官方 v1.22.0 release 明示驱动版本未变，文件版本与之相容，但不能仅据文件版本
+  证明安装包来源；此次未运行安装器。ARM64 依赖图确认无 vigem-client，但完整
+  `cargo check --target aarch64-pc-windows-msvc` 因缺少 ARM64 C 编译器阻塞；根库
+  测试唯一失败为已有 ACL 目录清理拒绝访问。这些不属于后端普通测试或 spike 通过。
