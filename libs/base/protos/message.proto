@@ -104,6 +104,7 @@ message Features {
   bool privacy_mode = 1;
   bool terminal = 2;
   bool port_forward_mux = 3;
+  bool gamepad = 4;
 }
 
 message CodecAbility {
@@ -1002,6 +1003,49 @@ message PortForwardChannel {
   }
 }
 
+message GamepadControl {
+  uint32 slot = 1;
+  bool enabled = 2;
+}
+
+message GamepadInput {
+  uint32 slot = 1;
+  bool connected = 2;
+  uint32 buttons = 3;
+  uint32 left_trigger = 4;
+  uint32 right_trigger = 5;
+  sint32 thumb_lx = 6;
+  sint32 thumb_ly = 7;
+  sint32 thumb_rx = 8;
+  sint32 thumb_ry = 9;
+}
+
+enum GamepadStatusKind {
+  STOPPED = 0;
+  READY = 1;
+  ACTIVE = 2;
+  DISABLED_BY_REMOTE = 3;
+  DRIVER_MISSING = 4;
+  VERSION_MISMATCH = 5;
+  NO_FREE_SLOT = 6;
+  BUSY = 7;
+  ACCESS_DENIED = 8;
+  INTERNAL_ERROR = 9;
+}
+
+message GamepadStatus {
+  uint32 slot = 1;
+  GamepadStatusKind kind = 2;
+}
+
+message GamepadMessage {
+  oneof union {
+    GamepadControl control = 1;
+    GamepadInput input = 2;
+    GamepadStatus status = 3;
+  }
+}
+
 message Message {
   oneof union {
     SignedId signed_id = 3;
@@ -1037,5 +1081,6 @@ message Message {
     PortForwardChannel port_forward_channel = 33;
     // Auto Login: the peer types the password only if it is at its logon or lock screen.
     OSLogin os_login = 34;
+    GamepadMessage gamepad = 35;
   }
 }
