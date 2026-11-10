@@ -292,15 +292,5 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("api_server_empty_tip", "With API Server empty, your custom server defaults to HTTP. Contact your administrator to enable HTTPS."),
         ("android-logs-folder-tip", "Choose Android → media to store log files."),
         ("install-directory-not-empty-tip", "The selected folder is not empty. Installation may delete existing data. Consider choosing a different folder."),
-        ("Gamepad", ""),
-        ("Enable gamepad passthrough", ""),
-        ("Remote gamepad driver is unavailable", ""),
-        ("Gamepad is disabled on the remote device", ""),
-        ("Gamepad is active", ""),
-        ("Remote gamepad version is incompatible", ""),
-        ("No free remote gamepad slot", ""),
-        ("Remote gamepad is in use", ""),
-        ("Remote gamepad access denied", ""),
-        ("Remote gamepad error", ""),
     ].iter().cloned().collect();
 }
