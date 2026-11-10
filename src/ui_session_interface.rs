@@ -1626,6 +1626,10 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::CloseVoiceCall);
     }
 
+    pub fn set_gamepad_enabled(&self, enabled: bool) {
+        self.send(Data::GamepadEnabled(enabled));
+    }
+
     pub fn send_selected_session_id(&self, sid: String) {
         if let Ok(sid) = sid.parse::<u32>() {
             self.lc.write().unwrap().selected_windows_session_id = Some(sid);

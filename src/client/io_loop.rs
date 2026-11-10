@@ -52,7 +52,7 @@ use hbb_common::{
     timeout,
     tokio::{
         self,
-        sync::mpsc,
+        sync::{mpsc, watch},
         time::{self, Duration, Instant},
     },
     Stream,
@@ -70,6 +70,59 @@ use std::{
         Arc, RwLock,
     },
 };
+
+#[cfg(all(test, not(all(target_os = "windows", target_arch = "x86_64"))))]
+#[path = "../platform/windows/gamepad_capture.rs"]
+mod gamepad_capture;
+
+#[derive(Default)]
+enum GamepadForwarding {
+    #[default]
+    Off,
+    Waiting,
+    Capturing,
+}
+
+#[derive(Debug, PartialEq)]
+enum GamepadCaptureAction {
+    None,
+    Start,
+    Stop,
+}
+
+impl GamepadForwarding {
+    fn control(&mut self, supported: bool, enabled: bool) -> Option<Message> {
+        let already_enabled = !matches!(self, Self::Off);
+        if !supported || enabled == already_enabled {
+            return None;
+        }
+        *self = if enabled { Self::Waiting } else { Self::Off };
+        let mut gamepad = GamepadMessage::new();
+        gamepad.set_control(GamepadControl {
+            enabled,
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_gamepad(gamepad);
+        Some(message)
+    }
+
+    fn status(&mut self, kind: Option<GamepadStatusKind>) -> GamepadCaptureAction {
+        match kind {
+            Some(GamepadStatusKind::READY) if matches!(self, Self::Waiting) => {
+                *self = Self::Capturing;
+                GamepadCaptureAction::Start
+            }
+            Some(GamepadStatusKind::READY | GamepadStatusKind::ACTIVE) => {
+                GamepadCaptureAction::None
+            }
+            _ => {
+                *self = Self::Off;
+                GamepadCaptureAction::Stop
+            }
+        }
+    }
+}
 
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
@@ -97,6 +150,10 @@ pub struct Remote<T: InvokeUiSession> {
     video_format: CodecFormat,
     elevation_requested: bool,
     peer_info: ParsedPeerInfo,
+    gamepad_forwarding: GamepadForwarding,
+    gamepad_input: watch::Receiver<Option<GamepadInput>>,
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    gamepad_capture: Option<crate::platform::windows::gamepad_capture::GamepadCapture>,
     video_threads: HashMap<usize, VideoThread>,
     last_auto_fps: Option<usize>,
     chroma: Arc<RwLock<Option<Chroma>>>,
@@ -113,6 +170,7 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
+    support_gamepad: bool,
 }
 
 impl ParsedPeerInfo {
@@ -151,6 +209,10 @@ impl<T: InvokeUiSession> Remote<T> {
             voice_call_request_timestamp: None,
             elevation_requested: false,
             peer_info: Default::default(),
+            gamepad_forwarding: Default::default(),
+            gamepad_input: watch::channel(None).1,
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            gamepad_capture: None,
             video_threads: Default::default(),
             last_auto_fps: None,
             chroma: Default::default(),
@@ -329,6 +391,20 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }
                             }
                         }
+                        changed = self.gamepad_input.changed(), if matches!(self.gamepad_forwarding, GamepadForwarding::Capturing) => {
+                            if changed.is_err() {
+                                self.gamepad_forwarding = GamepadForwarding::Off;
+                                self.stop_gamepad_capture(&mut peer).await;
+                            } else {
+                                let input = self.gamepad_input.borrow_and_update().clone();
+                                if let Some(input) = input {
+                                    if let Err(error) = Self::send_gamepad_input(&mut peer, input).await {
+                                        log::trace!("Gamepad send failed: {}", error);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         _msg = rx_clip_client.recv() => {
                             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                             self.handle_local_clipboard_msg(&mut peer, _msg).await;
@@ -425,6 +501,8 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                 }
+                self.gamepad_forwarding = GamepadForwarding::Off;
+                self.stop_gamepad_capture(&mut peer).await;
                 log::debug!("Exit io_loop of id={}", self.handler.get_id());
                 // Stop client audio server.
                 if let Some(s) = self.stop_voice_call_sender.take() {
@@ -754,8 +832,79 @@ impl<T: InvokeUiSession> Remote<T> {
         });
     }
 
+    async fn send_gamepad_input(
+        peer: &mut Stream,
+        input: GamepadInput,
+    ) -> hbb_common::ResultType<()> {
+        let mut gamepad = GamepadMessage::new();
+        gamepad.set_input(input);
+        let mut message = Message::new();
+        message.set_gamepad(gamepad);
+        peer.send(&message).await
+    }
+
+    async fn stop_gamepad_capture(&mut self, _peer: &mut Stream) {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        if let Some(mut capture) = self.gamepad_capture.take() {
+            if let Err(error) = tokio::task::spawn_blocking(move || capture.stop()).await {
+                log::error!("Gamepad capture cleanup failed: {}", error);
+            }
+            let input = self.gamepad_input.borrow_and_update().clone();
+            if let Some(input) = input {
+                if let Err(error) = Self::send_gamepad_input(_peer, input).await {
+                    log::trace!("Gamepad final disconnect send failed: {}", error);
+                }
+            }
+        }
+    }
+
+    async fn handle_gamepad_status(&mut self, status: GamepadStatus, peer: &mut Stream) {
+        if status.slot != 0 {
+            return;
+        }
+        match self
+            .gamepad_forwarding
+            .status(status.kind.enum_value().ok())
+        {
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            GamepadCaptureAction::Start => {
+                let (sender, receiver) = watch::channel(None);
+                match crate::platform::windows::gamepad_capture::GamepadCapture::start(sender) {
+                    Ok(capture) => {
+                        self.gamepad_input = receiver;
+                        self.gamepad_capture = Some(capture);
+                    }
+                    Err(error) => {
+                        log::error!("Gamepad capture start failed: {}", error);
+                        if let Some(message) = self.gamepad_forwarding.control(true, false) {
+                            allow_err!(peer.send(&message).await);
+                        }
+                    }
+                }
+            }
+            GamepadCaptureAction::Stop => self.stop_gamepad_capture(peer).await,
+            _ => {}
+        }
+    }
+
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
+            Data::GamepadEnabled(enabled) => {
+                let supported = self.is_connected
+                    && self.handler.is_default()
+                    && self.peer_info.support_gamepad
+                    && cfg!(all(target_os = "windows", target_arch = "x86_64"));
+                if let Some(message) = self.gamepad_forwarding.control(supported, enabled) {
+                    if !enabled {
+                        self.stop_gamepad_capture(peer).await;
+                    }
+                    if let Err(error) = peer.send(&message).await {
+                        log::error!("Gamepad control send failed: {}", error);
+                        self.gamepad_forwarding = GamepadForwarding::Off;
+                        self.stop_gamepad_capture(peer).await;
+                    }
+                }
+            }
             Data::Close => {
                 self.send_close_reason(peer, "").await;
                 return false;
@@ -1696,6 +1845,11 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
+                Some(message::Union::Gamepad(gamepad)) => {
+                    if let Some(gamepad_message::Union::Status(status)) = gamepad.union {
+                        self.handle_gamepad_status(status, peer).await;
+                    }
+                }
                 Some(message::Union::VideoFrame(vf)) => {
                     if !self.first_frame {
                         self.first_frame = true;
@@ -2594,6 +2748,11 @@ impl<T: InvokeUiSession> Remote<T> {
     fn set_peer_info(&mut self, pi: &PeerInfo) {
         self.last_auto_fps = None;
         self.peer_info.platform = pi.platform.clone();
+        self.peer_info.support_gamepad = pi
+            .features
+            .as_ref()
+            .map(|features| features.gamepad)
+            .unwrap_or(false);
 
         // Check features field for terminal support
         if let Some(features) = pi.features.as_ref() {
@@ -3155,6 +3314,180 @@ impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
         *self.discard_queue.write().unwrap() = true;
+    }
+}
+
+#[cfg(test)]
+mod tests_gamepad {
+    use super::*;
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[tokio::test]
+    async fn gamepad_capability_ready_and_stop_reach_the_wire() {
+        #[cfg(feature = "flutter")]
+        type TestHandler = crate::flutter::FlutterHandler;
+        #[cfg(not(feature = "flutter"))]
+        type TestHandler = crate::ui::remote::SciterHandler;
+        let listener = hbb_common::tcp::new_listener("127.0.0.1:0", false).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (peer, accepted) = tokio::join!(
+            hbb_common::socket_client::connect_tcp(addr.to_string(), 3000),
+            listener.accept()
+        );
+        let (accepted, far_addr) = accepted.unwrap();
+        let mut far = Stream::Tcp(hbb_common::tcp::FramedStream::from(accepted, far_addr));
+        let (sender, receiver) = mpsc::unbounded_channel::<Data>();
+        let mut remote = Remote::new(Session::<TestHandler>::default(), receiver, sender);
+        let mut peer = peer.unwrap();
+        remote.is_connected = true;
+        for features in [None, Some(Features::default())] {
+            remote.set_peer_info(&PeerInfo {
+                features: features.into(),
+                ..Default::default()
+            });
+            remote
+                .handle_msg_from_ui(Data::GamepadEnabled(true), &mut peer)
+                .await;
+            assert!(hbb_common::timeout(100, far.next()).await.is_err());
+        }
+        remote.set_peer_info(&PeerInfo {
+            features: Some(Features {
+                gamepad: true,
+                ..Default::default()
+            })
+            .into(),
+            ..Default::default()
+        });
+        remote
+            .handle_msg_from_ui(Data::GamepadEnabled(true), &mut peer)
+            .await;
+        let bytes = hbb_common::timeout(1000, far.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let message = Message::parse_from_bytes(&bytes).unwrap();
+        assert!(message.gamepad().control().enabled);
+        assert_eq!(message.gamepad().control().slot, 0);
+        assert!(remote.gamepad_input.changed().await.is_err());
+
+        for kind in [GamepadStatusKind::READY, GamepadStatusKind::STOPPED] {
+            let mut gamepad = GamepadMessage::new();
+            gamepad.set_status(GamepadStatus {
+                kind: kind.into(),
+                ..Default::default()
+            });
+            let mut message = Message::new();
+            message.set_gamepad(gamepad);
+            remote
+                .handle_msg_from_peer(&message.write_to_bytes().unwrap(), &mut peer)
+                .await;
+            if kind == GamepadStatusKind::READY {
+                hbb_common::timeout(1000, remote.gamepad_input.changed())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let input = remote.gamepad_input.borrow_and_update().clone().unwrap();
+                Remote::<TestHandler>::send_gamepad_input(&mut peer, input)
+                    .await
+                    .unwrap();
+                let bytes = hbb_common::timeout(1000, far.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let message = Message::parse_from_bytes(&bytes).unwrap();
+                assert_eq!(message.gamepad().input().slot, 0);
+            } else {
+                let bytes = hbb_common::timeout(1000, far.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let message = Message::parse_from_bytes(&bytes).unwrap();
+                assert_eq!(message.gamepad().input(), &GamepadInput::default());
+            }
+        }
+    }
+
+    #[test]
+    fn capability_gates_control_and_ready_gates_capture() {
+        for features in [None, Some(Features::default())] {
+            let mut forwarding = GamepadForwarding::default();
+            let supported = features.as_ref().map(|f| f.gamepad).unwrap_or(false);
+            assert!(forwarding.control(supported, true).is_none());
+            assert_eq!(
+                forwarding.status(Some(GamepadStatusKind::READY)),
+                GamepadCaptureAction::None
+            );
+        }
+        let mut forwarding = GamepadForwarding::default();
+        let message = forwarding.control(true, true).expect("enable control");
+        let Some(message::Union::Gamepad(gamepad)) = message.union else {
+            panic!("gamepad message")
+        };
+        let Some(gamepad_message::Union::Control(control)) = gamepad.union else {
+            panic!("control")
+        };
+        assert_eq!((control.slot, control.enabled), (0, true));
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::ACTIVE)),
+            GamepadCaptureAction::None
+        );
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::READY)),
+            GamepadCaptureAction::Start
+        );
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::READY)),
+            GamepadCaptureAction::None
+        );
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::ACTIVE)),
+            GamepadCaptureAction::None
+        );
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::STOPPED)),
+            GamepadCaptureAction::Stop
+        );
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::READY)),
+            GamepadCaptureAction::None
+        );
+    }
+
+    #[test]
+    fn all_gamepad_errors_and_disable_stop_capture() {
+        for kind in [
+            Some(GamepadStatusKind::DISABLED_BY_REMOTE),
+            Some(GamepadStatusKind::DRIVER_MISSING),
+            Some(GamepadStatusKind::VERSION_MISMATCH),
+            Some(GamepadStatusKind::NO_FREE_SLOT),
+            Some(GamepadStatusKind::BUSY),
+            Some(GamepadStatusKind::ACCESS_DENIED),
+            Some(GamepadStatusKind::INTERNAL_ERROR),
+            None,
+        ] {
+            let mut forwarding = GamepadForwarding::default();
+            assert!(forwarding.control(true, true).is_some());
+            assert_eq!(
+                forwarding.status(Some(GamepadStatusKind::READY)),
+                GamepadCaptureAction::Start
+            );
+            assert_eq!(forwarding.status(kind), GamepadCaptureAction::Stop);
+            assert_eq!(
+                forwarding.status(Some(GamepadStatusKind::READY)),
+                GamepadCaptureAction::None
+            );
+        }
+        let mut forwarding = GamepadForwarding::default();
+        forwarding.control(true, true);
+        forwarding.status(Some(GamepadStatusKind::READY));
+        assert!(forwarding.control(true, false).is_some());
+        assert_eq!(
+            forwarding.status(Some(GamepadStatusKind::READY)),
+            GamepadCaptureAction::None
+        );
     }
 }
 
